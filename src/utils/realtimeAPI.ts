@@ -1,138 +1,155 @@
+import { WebSocketEvent } from '@/types/websocket';
+import { SESSION_CONFIG } from '@/constants/config';
+
 interface RealtimeAPIConfig {
   apiKey: string;
   voice: string;
-  modalities: string[];
-  instructions?: string;
+  onInterruption?: () => void;
+  onMessageComplete?: () => void;
+  onError?: (error: Error) => void;
 }
-
-type MessageHandler = (message: any) => void;
-type ErrorHandler = (error: any) => void;
 
 export class RealtimeAPI {
   private ws: WebSocket | null = null;
-  private messageHandler: MessageHandler;
-  private errorHandler: ErrorHandler;
+  private audioBuffer: ArrayBuffer[] = [];
+  private isProcessing: boolean = false;
+  private isSpeaking: boolean = false;
+  private lastMessageId: string | null = null;
   private config: RealtimeAPIConfig;
 
-  constructor(
-    config: RealtimeAPIConfig,
-    messageHandler: MessageHandler,
-    errorHandler: ErrorHandler
-  ) {
+  constructor(config: RealtimeAPIConfig) {
     this.config = config;
-    this.messageHandler = messageHandler;
-    this.errorHandler = errorHandler;
   }
 
-  connect = async () => {
+  // Connect to OpenAI's Realtime API
+  async connect(): Promise<void> {
     try {
-      // Initialize WebSocket connection to OpenAI's Realtime API
-      this.ws = new WebSocket('wss://api.openai.com/v1/audio/realtime');
-
+      this.ws = new WebSocket(SESSION_CONFIG.WEBSOCKET.URL);
+      
       this.ws.onopen = () => {
-        // Send initial session configuration
-        this.sendEvent({
-          type: 'session.update',
-          session: {
-            modalities: this.config.modalities,
-            voice: this.config.voice,
-            instructions: this.config.instructions || '',
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500,
-            },
-          },
-        });
+        this.initializeSession();
       };
 
-      this.ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        this.messageHandler(data);
-      };
-
-      this.ws.onerror = (error) => {
-        this.errorHandler(error);
-      };
-
-      this.ws.onclose = () => {
-        console.log('WebSocket connection closed');
-      };
+      this.ws.onmessage = this.handleMessage.bind(this);
+      this.ws.onerror = this.handleError.bind(this);
+      this.ws.onclose = this.handleClose.bind(this);
     } catch (error) {
-      this.errorHandler(error);
+      this.handleError(error as Error);
     }
-  };
+  }
 
-  disconnect = () => {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+  // Initialize session with OpenAI
+  private initializeSession(): void {
+    if (!this.ws) return;
+
+    const sessionConfig = {
+      type: 'session.update',
+      session: {
+        modalities: ['text', 'audio'],
+        voice: this.config.voice,
+        input_audio_format: 'pcm16',
+        output_audio_format: 'pcm16',
+        turn_detection: {
+          type: 'server_vad',
+          threshold: SESSION_CONFIG.DEFAULT_VAD_THRESHOLD,
+          prefix_padding_ms: SESSION_CONFIG.PREFIX_PADDING,
+          silence_duration_ms: SESSION_CONFIG.DEFAULT_SILENCE_DURATION,
+        },
+      },
+    };
+
+    this.sendEvent(sessionConfig);
+  }
+
+  // Handle incoming messages
+  private handleMessage(event: MessageEvent): void {
+    const data = JSON.parse(event.data) as WebSocketEvent;
+
+    switch (data.type) {
+      case 'response.text.delta':
+        this.isSpeaking = true;
+        break;
+
+      case 'response.text.done':
+        this.isSpeaking = false;
+        this.config.onMessageComplete?.();
+        break;
+
+      case 'error':
+        this.handleError(new Error(data.error.message));
+        break;
     }
-  };
+  }
 
-  sendEvent = (event: any) => {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+  // Handle errors
+  private handleError(error: Error): void {
+    console.error('RealtimeAPI error:', error);
+    this.config.onError?.(error);
+  }
+
+  // Handle WebSocket close
+  private handleClose(): void {
+    this.ws = null;
+    this.isProcessing = false;
+    this.isSpeaking = false;
+  }
+
+  // Send event to OpenAI
+  private sendEvent(event: any): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(event));
-    } else {
-      console.error('WebSocket not connected');
     }
-  };
+  }
 
-  sendAudioChunk = (audioData: ArrayBuffer) => {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // Convert ArrayBuffer to base64
-      const base64Audio = btoa(String.fromCharCode(...new Uint8Array(audioData)));
+  // Process audio data
+  async processAudioChunk(audioData: ArrayBuffer): Promise<void> {
+    if (this.isSpeaking) {
+      this.config.onInterruption?.();
+      return;
+    }
+
+    this.audioBuffer.push(audioData);
+
+    if (!this.isProcessing) {
+      this.isProcessing = true;
+      await this.processAudioBuffer();
+    }
+  }
+
+  // Process audio buffer
+  private async processAudioBuffer(): Promise<void> {
+    while (this.audioBuffer.length > 0) {
+      const chunk = this.audioBuffer.shift();
+      if (!chunk) continue;
+
+      const base64Audio = btoa(String.fromCharCode(...new Uint8Array(chunk)));
       
       this.sendEvent({
         type: 'input_audio_buffer.append',
         audio: base64Audio,
       });
+
+      await new Promise(resolve => setTimeout(resolve, 50)); // Throttle processing
     }
-  };
 
-  // Cultural competency session-specific methods
-  startSession = () => {
-    if (!this.ws) return;
-    
-    const instructions = `
-      You are a cultural competency facilitator leading an interactive session.
-      Follow these guidelines:
-      1. Guide participants through the cultural competency workbook sections
-      2. Ask open-ended questions to encourage discussion
-      3. Listen actively and provide constructive feedback
-      4. Maintain a respectful and inclusive environment
-      5. Adapt your pace based on participant responses
-      6. Use clear, concise language
-      Your goal is to help participants develop cultural awareness and competency skills.
-    `;
+    this.isProcessing = false;
+  }
 
-    this.sendEvent({
-      type: 'session.update',
-      session: {
-        ...this.config,
-        instructions,
-      },
-    });
-  };
+  // Stop current speech
+  stopSpeaking(): void {
+    if (this.lastMessageId) {
+      this.sendEvent({
+        type: 'conversation.item.truncate',
+        item_id: this.lastMessageId,
+        content_index: 0,
+      });
+    }
+    this.isSpeaking = false;
+  }
 
-  handleParticipantResponse = (responseText: string) => {
-    // Create a conversation item from the participant's response
-    this.sendEvent({
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [{
-          type: 'text',
-          text: responseText,
-        }],
-      },
-    });
-
-    // Trigger AI response
-    this.sendEvent({
-      type: 'response.create',
-    });
-  };
+  // Disconnect
+  disconnect(): void {
+    this.ws?.close();
+    this.handleClose();
+  }
 }
