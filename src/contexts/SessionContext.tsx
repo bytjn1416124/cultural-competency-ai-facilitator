@@ -1,11 +1,7 @@
 "use client";
 
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useEffect } from 'react';
 import type { SessionState, SessionControls, SessionConfig, SessionProgress } from '@/types/session';
-import { ScriptManager } from '@/utils/scriptManager';
-import { RealtimeAPI } from '@/utils/realtimeAPI';
-import { VoiceActivityDetector } from '@/utils/voiceActivityDetection';
-import { getEnvVar } from '@/lib/env';
 
 interface SessionContextType {
   state: SessionState;
@@ -23,7 +19,7 @@ type SessionAction =
   | { type: 'CLEAR_ERROR' }
   | { type: 'SET_SPEAKING'; payload: boolean }
   | { type: 'SET_LISTENING'; payload: boolean }
-  | { type: 'SET_FREQUENCY'; payload: number }
+  | { type: 'UPDATE_FREQUENCY'; payload: number }
   | { type: 'UPDATE_PROGRESS'; payload: Partial<SessionProgress> };
 
 const initialState: SessionState = {
@@ -60,8 +56,10 @@ function sessionReducer(state: SessionState, action: SessionAction): SessionStat
       return { ...state, isSpeaking: action.payload };
     case 'SET_LISTENING':
       return { ...state, isListening: action.payload };
-    case 'SET_FREQUENCY':
+    case 'UPDATE_FREQUENCY':
       return { ...state, frequency: action.payload };
+    case 'UPDATE_PROGRESS':
+      return { ...state, ...action.payload };
     default:
       return state;
   }
@@ -70,11 +68,8 @@ function sessionReducer(state: SessionState, action: SessionAction): SessionStat
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(sessionReducer, initialState);
   
+  // Core session controls
   const startSession = useCallback(() => {
-    if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY && process.env.NODE_ENV === 'production') {
-      dispatch({ type: 'SET_ERROR', payload: 'OpenAI API key is required' });
-      return;
-    }
     dispatch({ type: 'START_SESSION' });
   }, []);
 
@@ -82,16 +77,77 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'END_SESSION' });
   }, []);
 
+  const pauseSession = useCallback(() => {
+    dispatch({ type: 'PAUSE_SESSION' });
+  }, []);
+
+  const resumeSession = useCallback(() => {
+    dispatch({ type: 'RESUME_SESSION' });
+  }, []);
+
+  // Audio and frequency controls
+  const updateFrequency = useCallback((frequency: number) => {
+    dispatch({ type: 'UPDATE_FREQUENCY', payload: frequency });
+  }, []);
+
+  const setSpeaking = useCallback((speaking: boolean) => {
+    dispatch({ type: 'SET_SPEAKING', payload: speaking });
+  }, []);
+
+  const setListening = useCallback((listening: boolean) => {
+    dispatch({ type: 'SET_LISTENING', payload: listening });
+  }, []);
+
+  // Error handling
+  const setError = useCallback((error: string) => {
+    dispatch({ type: 'SET_ERROR', payload: error });
+  }, []);
+
+  const clearError = useCallback(() => {
+    dispatch({ type: 'CLEAR_ERROR' });
+  }, []);
+
+  // Handle keyboard events
+  useEffect(() => {
+    if (!state.isActive) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !e.repeat) {
+        e.preventDefault();
+        setSpeaking(true);
+        setListening(true);
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        setSpeaking(false);
+        setListening(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [state.isActive, setSpeaking, setListening]);
+
   const contextValue: SessionContextType = {
     state,
     controls: {
       startSession,
       endSession,
-      pauseSession: () => dispatch({ type: 'PAUSE_SESSION' }),
-      resumeSession: () => dispatch({ type: 'RESUME_SESSION' }),
-      moveToNextStep: () => {},  // Implement these as needed
-      moveToNextExercise: () => {},
-      moveToNextSection: () => {},
+      pauseSession,
+      resumeSession,
+      updateFrequency,
+      setSpeaking,
+      setListening,
+      setError,
+      clearError,
     },
     progress: {
       totalSections: 0,
