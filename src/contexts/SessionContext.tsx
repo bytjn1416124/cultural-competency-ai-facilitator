@@ -71,6 +71,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(sessionReducer, initialState);
   
   const startSession = useCallback(() => {
+    if (!process.env.NEXT_PUBLIC_OPENAI_API_KEY && process.env.NODE_ENV === 'production') {
+      dispatch({ type: 'SET_ERROR', payload: 'OpenAI API key is required' });
+      return;
+    }
     dispatch({ type: 'START_SESSION' });
   }, []);
 
@@ -100,12 +104,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       timeRemaining: 0,
     },
     config: {
-      apiKey: getEnvVar.asString('NEXT_PUBLIC_OPENAI_API_KEY'),
-      voice: 'alloy',
-      vadThreshold: 0.2,
-      silenceDuration: 500,
-      maxSessionDuration: 14400000, // 4 hours
-      breakDuration: 900000, // 15 minutes
+      apiKey: process.env.NEXT_PUBLIC_OPENAI_API_KEY || 'development-key',
+      voice: process.env.NEXT_PUBLIC_DEFAULT_VOICE || 'alloy',
+      vadThreshold: Number(process.env.NEXT_PUBLIC_VAD_THRESHOLD) || 0.2,
+      silenceDuration: Number(process.env.NEXT_PUBLIC_VAD_SILENCE_DURATION) || 500,
+      maxSessionDuration: Number(process.env.NEXT_PUBLIC_MAX_SESSION_DURATION) || 14400000,
+      breakDuration: Number(process.env.NEXT_PUBLIC_DEFAULT_BREAK_DURATION) || 900000,
     },
   };
 
