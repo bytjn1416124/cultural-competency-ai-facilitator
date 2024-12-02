@@ -5,7 +5,7 @@ import type { SessionState, SessionControls, SessionConfig, SessionProgress } fr
 import { ScriptManager } from '@/utils/scriptManager';
 import { RealtimeAPI } from '@/utils/realtimeAPI';
 import { VoiceActivityDetector } from '@/utils/voiceActivityDetection';
-import { getEnvVar } from '@/types/env';
+import { getEnvVar } from '@/lib/env';
 
 interface SessionContextType {
   state: SessionState;
