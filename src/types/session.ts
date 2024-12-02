@@ -17,9 +17,11 @@ export interface SessionControls {
   endSession: () => void;
   pauseSession: () => void;
   resumeSession: () => void;
-  moveToNextStep: () => void;
-  moveToNextExercise: () => void;
-  moveToNextSection: () => void;
+  updateFrequency: (frequency: number) => void;
+  setSpeaking: (speaking: boolean) => void;
+  setListening: (listening: boolean) => void;
+  setError: (error: string) => void;
+  clearError: () => void;
 }
 
 export interface SessionConfig {
