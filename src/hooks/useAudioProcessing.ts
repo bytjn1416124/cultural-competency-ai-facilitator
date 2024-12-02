@@ -1,157 +1,115 @@
-import { useEffect, useRef, useState } from 'react';
-import { AudioProcessor } from '@/utils/audioProcessor';
-import { SESSION_CONFIG } from '@/constants/config';
-
-interface AudioProcessingState {
-  isInitialized: boolean;
-  isProcessing: boolean;
-  currentEnergy: number;
-  speechProbability: number;
-  error: Error | null;
-}
+import { useState, useEffect, useCallback } from 'react';
+import { useSession } from '@/contexts/SessionContext';
 
 interface AudioProcessingConfig {
-  onAudioData?: (buffer: Float32Array) => void;
   onSpeechDetected?: () => void;
   onSpeechEnded?: () => void;
   onError?: (error: Error) => void;
 }
 
 export const useAudioProcessing = (config: AudioProcessingConfig = {}) => {
-  const [state, setState] = useState<AudioProcessingState>({
-    isInitialized: false,
-    isProcessing: false,
-    currentEnergy: 0,
-    speechProbability: 0,
-    error: null
-  });
+  const { state, controls } = useSession();
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const processorRef = useRef<AudioProcessor | null>(null);
-  const speechTimeoutRef = useRef<NodeJS.Timeout>();
+  // Start audio processing
+  const startProcessing = useCallback(async () => {
+    try {
+      // Check if the browser supports AudioContext
+      if (typeof window === 'undefined' || !window.AudioContext) {
+        throw new Error('AudioContext is not supported in this browser');
+      }
 
+      // Request microphone permission
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // Create audio context
+      const context = new AudioContext();
+      setAudioContext(context);
+
+      // Create analyzer node
+      const analyzer = context.createAnalyser();
+      analyzer.fftSize = 2048;
+
+      // Create source from microphone
+      const source = context.createMediaStreamSource(stream);
+      source.connect(analyzer);
+
+      // Start processing
+      setIsProcessing(true);
+      setError(null);
+
+      // Setup audio processing loop
+      const bufferLength = analyzer.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      const processAudio = () => {
+        if (!isProcessing) return;
+
+        analyzer.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((acc, value) => acc + value, 0) / bufferLength;
+        const frequency = Math.min(100, (average / 255) * 100);
+
+        // Update frequency in session state
+        controls.updateFrequency(frequency);
+
+        requestAnimationFrame(processAudio);
+      };
+
+      processAudio();
+
+      // Listen for spacebar
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.code === 'Space' && !e.repeat && isProcessing) {
+          e.preventDefault();
+          config.onSpeechDetected?.();
+        }
+      };
+
+      const handleKeyUp = (e: KeyboardEvent) => {
+        if (e.code === 'Space' && isProcessing) {
+          e.preventDefault();
+          config.onSpeechEnded?.();
+        }
+      };
+
+      window.addEventListener('keydown', handleKeyDown);
+      window.addEventListener('keyup', handleKeyUp);
+
+      return () => {
+        window.removeEventListener('keydown', handleKeyDown);
+        window.removeEventListener('keyup', handleKeyUp);
+      };
+
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to start audio processing';
+      setError(errorMessage);
+      config.onError?.(new Error(errorMessage));
+      throw err;
+    }
+  }, [config, isProcessing, controls]);
+
+  // Stop audio processing
+  const stopProcessing = useCallback(() => {
+    setIsProcessing(false);
+    if (audioContext?.state !== 'closed') {
+      audioContext?.close();
+    }
+    setAudioContext(null);
+  }, [audioContext]);
+
+  // Cleanup on unmount
   useEffect(() => {
-    const initializeProcessor = async () => {
-      try {
-        const processor = new AudioProcessor({
-          onAudioData: handleAudioData,
-          onEnergyChange: handleEnergyChange,
-          onSpeechProbability: handleSpeechProbability,
-          onError: handleError
-        });
-
-        await processor.initialize();
-        processorRef.current = processor;
-
-        setState(prev => ({
-          ...prev,
-          isInitialized: true,
-          error: null
-        }));
-      } catch (error) {
-        handleError(error as Error);
-      }
-    };
-
-    initializeProcessor();
-
     return () => {
-      cleanup();
+      stopProcessing();
     };
-  }, []);
-
-  const handleAudioData = (buffer: Float32Array) => {
-    config.onAudioData?.(buffer);
-  };
-
-  const handleEnergyChange = (energy: number) => {
-    setState(prev => ({
-      ...prev,
-      currentEnergy: energy
-    }));
-  };
-
-  const handleSpeechProbability = (probability: number) => {
-    setState(prev => ({
-      ...prev,
-      speechProbability: probability
-    }));
-
-    // Handle speech detection
-    if (probability > SESSION_CONFIG.VAD.DEFAULT_THRESHOLD) {
-      if (speechTimeoutRef.current) {
-        clearTimeout(speechTimeoutRef.current);
-      }
-      config.onSpeechDetected?.();
-    } else {
-      // Set timeout for speech end
-      if (speechTimeoutRef.current) {
-        clearTimeout(speechTimeoutRef.current);
-      }
-      speechTimeoutRef.current = setTimeout(() => {
-        config.onSpeechEnded?.();
-      }, SESSION_CONFIG.VAD.DEFAULT_SILENCE_DURATION);
-    }
-  };
-
-  const handleError = (error: Error) => {
-    setState(prev => ({
-      ...prev,
-      error,
-      isInitialized: false
-    }));
-    config.onError?.(error);
-  };
-
-  const startProcessing = async () => {
-    if (!processorRef.current) {
-      await initializeProcessor();
-    }
-
-    processorRef.current?.start();
-    setState(prev => ({
-      ...prev,
-      isProcessing: true
-    }));
-  };
-
-  const stopProcessing = () => {
-    processorRef.current?.stop();
-    setState(prev => ({
-      ...prev,
-      isProcessing: false
-    }));
-  };
-
-  const cleanup = () => {
-    if (speechTimeoutRef.current) {
-      clearTimeout(speechTimeoutRef.current);
-    }
-    processorRef.current?.cleanup();
-    processorRef.current = null;
-  };
-
-  const initializeProcessor = async () => {
-    const processor = new AudioProcessor({
-      onAudioData: handleAudioData,
-      onEnergyChange: handleEnergyChange,
-      onSpeechProbability: handleSpeechProbability,
-      onError: handleError
-    });
-
-    await processor.initialize();
-    processorRef.current = processor;
-
-    setState(prev => ({
-      ...prev,
-      isInitialized: true,
-      error: null
-    }));
-  };
+  }, [stopProcessing]);
 
   return {
-    ...state,
+    isProcessing,
+    error,
     startProcessing,
     stopProcessing,
-    cleanup
   };
 };
