@@ -1,6 +1,3 @@
-import { WebSocketEvent } from '@/types/websocket';
-import { SESSION_CONFIG } from '@/constants/config';
-
 interface RealtimeAPIConfig {
   apiKey: string;
   voice: string;
@@ -21,90 +18,101 @@ export class RealtimeAPI {
     this.config = config;
   }
 
-  // Connect to OpenAI's Realtime API
-  async connect(): Promise<void> {
+  // Connect to WebSocket
+  public async connect(): Promise<void> {
     try {
-      this.ws = new WebSocket(SESSION_CONFIG.WEBSOCKET.URL);
+      // For development, we'll just simulate the connection
+      if (process.env.NODE_ENV === 'development' && !this.config.apiKey.includes('sk-')) {
+        console.log('Development mode: Simulating WebSocket connection');
+        return;
+      }
+
+      this.ws = new WebSocket('wss://api.openai.com/v1/audio/realtime');
       
       this.ws.onopen = () => {
+        console.log('WebSocket connected');
         this.initializeSession();
       };
 
+      this.ws.onclose = () => {
+        console.log('WebSocket disconnected');
+      };
+
+      this.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        this.config.onError?.(error as Error);
+      };
+
       this.ws.onmessage = this.handleMessage.bind(this);
-      this.ws.onerror = this.handleError.bind(this);
-      this.ws.onclose = this.handleClose.bind(this);
     } catch (error) {
-      this.handleError(error as Error);
+      console.error('Error connecting to WebSocket:', error);
+      this.config.onError?.(error as Error);
     }
   }
 
-  // Initialize session with OpenAI
+  // Initialize session
   private initializeSession(): void {
     if (!this.ws) return;
 
-    const sessionConfig = {
+    const message = {
       type: 'session.update',
       session: {
         modalities: ['text', 'audio'],
         voice: this.config.voice,
-        input_audio_format: 'pcm16',
-        output_audio_format: 'pcm16',
-        turn_detection: {
-          type: 'server_vad',
-          threshold: SESSION_CONFIG.DEFAULT_VAD_THRESHOLD,
-          prefix_padding_ms: SESSION_CONFIG.PREFIX_PADDING,
-          silence_duration_ms: SESSION_CONFIG.DEFAULT_SILENCE_DURATION,
-        },
-      },
+      }
     };
 
-    this.sendEvent(sessionConfig);
+    this.sendMessage(message);
   }
 
   // Handle incoming messages
   private handleMessage(event: MessageEvent): void {
-    const data = JSON.parse(event.data) as WebSocketEvent;
+    try {
+      const data = JSON.parse(event.data);
+      console.log('Received message:', data);
 
-    switch (data.type) {
-      case 'response.text.delta':
-        this.isSpeaking = true;
-        break;
+      switch (data.type) {
+        case 'error':
+          this.config.onError?.(new Error(data.error.message));
+          break;
 
-      case 'response.text.done':
-        this.isSpeaking = false;
-        this.config.onMessageComplete?.();
-        break;
+        case 'response.completed':
+          this.config.onMessageComplete?.();
+          break;
 
-      case 'error':
-        this.handleError(new Error(data.error.message));
-        break;
+        case 'speech.start':
+          this.isSpeaking = true;
+          break;
+
+        case 'speech.end':
+          this.isSpeaking = false;
+          break;
+      }
+    } catch (error) {
+      console.error('Error handling message:', error);
+      this.config.onError?.(error as Error);
     }
   }
 
-  // Handle errors
-  private handleError(error: Error): void {
-    console.error('RealtimeAPI error:', error);
-    this.config.onError?.(error);
-  }
+  // Send message to WebSocket
+  private sendMessage(message: any): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn('WebSocket not connected');
+      return;
+    }
 
-  // Handle WebSocket close
-  private handleClose(): void {
-    this.ws = null;
-    this.isProcessing = false;
-    this.isSpeaking = false;
-  }
-
-  // Send event to OpenAI
-  private sendEvent(event: any): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(event));
+    try {
+      this.ws.send(JSON.stringify(message));
+    } catch (error) {
+      console.error('Error sending message:', error);
+      this.config.onError?.(error as Error);
     }
   }
 
   // Process audio data
-  async processAudioChunk(audioData: ArrayBuffer): Promise<void> {
-    if (this.isSpeaking) {
-      this.config.onInterruption?.();
+  public async processAudio(audioData: ArrayBuffer): Promise<void> {
+    if (process.env.NODE_ENV === 'development' && !this.config.apiKey.includes('sk-')) {
+      // Simulate processing in development
       return;
     }
 
@@ -122,34 +130,35 @@ export class RealtimeAPI {
       const chunk = this.audioBuffer.shift();
       if (!chunk) continue;
 
-      const base64Audio = btoa(String.fromCharCode(...new Uint8Array(chunk)));
-      
-      this.sendEvent({
-        type: 'input_audio_buffer.append',
-        audio: base64Audio,
-      });
+      const message = {
+        type: 'audio',
+        data: Buffer.from(chunk).toString('base64')
+      };
 
-      await new Promise(resolve => setTimeout(resolve, 50)); // Throttle processing
+      this.sendMessage(message);
+      await new Promise(resolve => setTimeout(resolve, 50)); // Rate limiting
     }
 
     this.isProcessing = false;
   }
 
-  // Stop current speech
-  stopSpeaking(): void {
-    if (this.lastMessageId) {
-      this.sendEvent({
-        type: 'conversation.item.truncate',
-        item_id: this.lastMessageId,
-        content_index: 0,
-      });
+  // Stop speaking
+  public stopSpeaking(): void {
+    if (this.isSpeaking) {
+      this.sendMessage({ type: 'stop' });
+      this.config.onInterruption?.();
     }
-    this.isSpeaking = false;
   }
 
-  // Disconnect
-  disconnect(): void {
-    this.ws?.close();
-    this.handleClose();
+  // Disconnect WebSocket
+  public disconnect(): void {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.audioBuffer = [];
+    this.isProcessing = false;
+    this.isSpeaking = false;
+    this.lastMessageId = null;
   }
 }
